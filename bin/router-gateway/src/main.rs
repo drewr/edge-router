@@ -8,9 +8,10 @@ use hyper::{
 use hyper_util::rt::tokio::TokioIo;
 use http_body_util::Full;
 use router_core::ServiceRegistry;
-use router_proxy::HttpProxy;
+use router_proxy::{HttpProxy, HealthCheckConfig, HealthChecker, TrafficPolicy};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::{info, debug};
 use tracing_subscriber::fmt::init as tracing_init;
@@ -36,6 +37,24 @@ async fn main() -> Result<()> {
     // Create router
     let router = Arc::new(Router::new(registry.clone()));
     info!("Router initialized");
+
+    // Initialize health checker
+    let health_check_config = HealthCheckConfig {
+        http_path: "/healthz".to_string(),
+        check_interval: Duration::from_secs(10),
+        timeout: Duration::from_secs(5),
+        unhealthy_threshold: 3,
+        healthy_threshold: 2,
+    };
+    let _health_checker = Arc::new(HealthChecker::new(health_check_config));
+    info!("Health checker initialized");
+
+    // Initialize traffic policy
+    let _traffic_policy = Arc::new(TrafficPolicy::default());
+    info!("Traffic policy initialized");
+    info!("  - Timeout: {:?}", _traffic_policy.timeout.request_timeout);
+    info!("  - Max Retries: {}", _traffic_policy.retry.max_retries);
+    info!("  - Circuit Breaker Failure Threshold: {}", _traffic_policy.circuit_breaker.failure_threshold);
 
     // Start the HTTP server on port 8080
     let addr: SocketAddr = ([0, 0, 0, 0], 8080).into();
