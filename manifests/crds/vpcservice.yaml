@@ -1,0 +1,113 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vpcservices.router.datum.net
+spec:
+  group: router.datum.net
+  names:
+    kind: VPCService
+    plural: vpcservices
+    singular: vpcservice
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - vpcAttachmentRef
+                - port
+              properties:
+                vpcAttachmentRef:
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the VPCAttachment
+                    namespace:
+                      type: string
+                      description: Namespace of the VPCAttachment
+                      default: default
+                protocol:
+                  type: string
+                  description: Protocol (HTTP, HTTPS, gRPC, TCP)
+                  default: HTTP
+                port:
+                  type: integer
+                  description: Port where the service listens
+                targetPort:
+                  type: integer
+                  description: Optional target port if different from port
+                healthCheck:
+                  type: object
+                  properties:
+                    httpPath:
+                      type: string
+                    intervalSeconds:
+                      type: integer
+                      default: 10
+                    timeoutSeconds:
+                      type: integer
+                      default: 5
+                    unhealthyThreshold:
+                      type: integer
+                      default: 3
+                    healthyThreshold:
+                      type: integer
+                      default: 2
+                discovery:
+                  type: object
+                  properties:
+                    dnsName:
+                      type: string
+                    method:
+                      type: string
+                      default: manual
+                labels:
+                  type: object
+                  additionalProperties:
+                    type: string
+            status:
+              type: object
+              properties:
+                ready:
+                  type: boolean
+                endpointCount:
+                  type: integer
+                lastUpdateTime:
+                  type: string
+                endpoints:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      ip:
+                        type: string
+                      port:
+                        type: integer
+                      ready:
+                        type: boolean
+                      lastHeartbeat:
+                        type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      conditionType:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastUpdateTime:
+                        type: string

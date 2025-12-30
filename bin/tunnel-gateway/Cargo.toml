@@ -1,0 +1,23 @@
+[package]
+name = "tunnel-gateway"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tunnel-gateway"
+path = "src/main.rs"
+
+[dependencies]
+router-api = { path = "../../lib/router-api" }
+router-tunnel = { path = "../../lib/router-tunnel" }
+kube = { workspace = true }
+k8s-openapi.workspace = true
+tokio.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,30 @@
+[package]
+name = "router-gateway"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "router-gateway"
+path = "src/main.rs"
+
+[dependencies]
+router-api = { path = "../../lib/router-api" }
+router-core = { path = "../../lib/router-core" }
+router-proxy = { path = "../../lib/router-proxy" }
+router-galactic = { path = "../../lib/router-galactic" }
+kube = { workspace = true }
+k8s-openapi.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

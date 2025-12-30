@@ -1,0 +1,133 @@
+# Example: Basic VPCService and VPCRoute setup
+
+---
+# Example VPCService for a backend API
+apiVersion: router.datum.net/v1alpha1
+kind: VPCService
+metadata:
+  name: api-backend
+  namespace: default
+spec:
+  vpcAttachmentRef:
+    name: main-vpc-attachment
+    namespace: default
+  protocol: HTTP
+  port: 8080
+  targetPort: 8080
+  labels:
+    tier: backend
+    app: api
+  healthCheck:
+    httpPath: /healthz
+    intervalSeconds: 10
+    timeoutSeconds: 5
+    unhealthyThreshold: 3
+    healthyThreshold: 2
+  discovery:
+    method: kubernetes
+    dnsName: api.default.svc.cluster.local
+
+---
+# Example VPCService for a database
+apiVersion: router.datum.net/v1alpha1
+kind: VPCService
+metadata:
+  name: database
+  namespace: default
+spec:
+  vpcAttachmentRef:
+    name: main-vpc-attachment
+    namespace: default
+  protocol: TCP
+  port: 5432
+  labels:
+    tier: database
+    app: postgres
+
+---
+# Example VPCRoute for HTTP path-based routing
+apiVersion: router.datum.net/v1alpha1
+kind: VPCRoute
+metadata:
+  name: api-routes
+  namespace: default
+spec:
+  name: api-routes
+  match:
+    pathPrefix: /api/v1
+    methods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+  destinations:
+    - vpcServiceRef:
+        name: api-backend
+        namespace: default
+      weight: 100
+  loadBalancing: round-robin
+  timeoutSeconds: 30
+  retries:
+    maxRetries: 3
+    retryOnStatus:
+      - 502
+      - 503
+      - 504
+    backoff:
+      initialMs: 100
+      maxMs: 10000
+  cors:
+    allowedOrigins:
+      - "*"
+    allowedMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowedHeaders:
+      - "Content-Type"
+      - "Authorization"
+    allowCredentials: true
+    maxAgeSeconds: 3600
+
+---
+# Example VPCRoute for exact path matching
+apiVersion: router.datum.net/v1alpha1
+kind: VPCRoute
+metadata:
+  name: health-check
+  namespace: default
+spec:
+  name: health-check
+  match:
+    exactPath: /healthz
+    methods:
+      - GET
+  destinations:
+    - vpcServiceRef:
+        name: api-backend
+        namespace: default
+  loadBalancing: round-robin
+  timeoutSeconds: 5
+
+---
+# Example ServiceBinding for Kubernetes Service integration
+apiVersion: router.datum.net/v1alpha1
+kind: ServiceBinding
+metadata:
+  name: api-binding
+  namespace: default
+spec:
+  serviceRef:
+    name: api-service
+    namespace: default
+  vpcServiceRef:
+    name: api-backend
+    namespace: default
+  portMappings:
+    - servicePort: 8080
+      vpcPort: 8080
+      protocol: TCP
+  autoSync: true
+  syncIntervalSeconds: 30

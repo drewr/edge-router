@@ -1,0 +1,126 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vpcroutes.router.datum.net
+spec:
+  group: router.datum.net
+  names:
+    kind: VPCRoute
+    plural: vpcroutes
+    singular: vpcroute
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - name
+                - match
+                - destinations
+              properties:
+                name:
+                  type: string
+                  description: Name of this route
+                match:
+                  type: object
+                  description: Match conditions for routing
+                  properties:
+                    pathPrefix:
+                      type: string
+                    exactPath:
+                      type: string
+                    headers:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    queryParams:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    methods:
+                      type: array
+                      items:
+                        type: string
+                    grpcService:
+                      type: string
+                    grpcMethod:
+                      type: string
+                destinations:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      vpcServiceRef:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                      weight:
+                        type: integer
+                        default: 100
+                      port:
+                        type: integer
+                loadBalancing:
+                  type: string
+                  default: round-robin
+                  enum:
+                    - round-robin
+                    - least-connections
+                    - source-ip
+                    - consistent-hash
+                timeoutSeconds:
+                  type: integer
+                retries:
+                  type: object
+                  properties:
+                    maxRetries:
+                      type: integer
+                    retryOnStatus:
+                      type: array
+                      items:
+                        type: integer
+                    backoff:
+                      type: object
+                      properties:
+                        initialMs:
+                          type: integer
+                        maxMs:
+                          type: integer
+                cors:
+                  type: object
+                  properties:
+                    allowedOrigins:
+                      type: array
+                      items:
+                        type: string
+                    allowedMethods:
+                      type: array
+                      items:
+                        type: string
+                    allowedHeaders:
+                      type: array
+                      items:
+                        type: string
+                    allowCredentials:
+                      type: boolean
+                    maxAgeSeconds:
+                      type: integer
+                sourceVpcAttachment:
+                  type: string
+            status:
+              type: object
+              properties:
+                ready:
+                  type: boolean
+                activeDestinations:
+                  type: integer

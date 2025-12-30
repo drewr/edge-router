@@ -1,0 +1,18 @@
+[package]
+name = "router-api"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+serde = { workspace = true }
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+uuid = { workspace = true }
+schemars = "0.8"

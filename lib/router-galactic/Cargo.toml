@@ -1,0 +1,18 @@
+[package]
+name = "router-galactic"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+router-api = { path = "../router-api" }
+kube = { workspace = true }
+k8s-openapi.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ipnetwork.workspace = true
