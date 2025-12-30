@@ -12,17 +12,29 @@ A Rust-based Layer 7 application router that sits above Galactic VPC's Layer 3 S
 - Service discovery daemon for cross-VPC discovery
 - Full Kubernetes manifests (CRDs, RBAC, deployments)
 
-🚀 **Phase 2: Upcoming**
-- HTTP/gRPC gateway with request routing
-- Load balancing (round-robin, least-connections, consistent hash)
-- Health checking and failover
-- TLS termination for VPCIngress
+✅ **Phase 2: Complete**
+- HTTP/1.1 gateway with request routing (`router-gateway` binary)
+- Load balancing with 4 strategies (round-robin, least-connections, source-IP hash, consistent hash)
+- VPCRoute controller with path/header/method matching
+- VPCIngress controller for external ingress management
+- Multi-controller orchestration in router-controller
+- Router module with path matching (exact, prefix, wildcard)
+- Service endpoint discovery and selection
+- VPCAttachment integration for Galactic VPC connectivity
+- Full deployment manifests with HA configuration
 
-🔮 **Phase 3: Future**
+🚀 **Phase 3: Upcoming**
+- Health checking and endpoint monitoring
+- Actual HTTP request forwarding and proxying
+- TLS termination for VPCIngress
 - Traffic policies (timeouts, retries, circuit breaking)
 - mTLS between services
 - Observability (metrics, tracing, logging)
+
+🔮 **Phase 4: Future**
 - Geographic routing based on Location CRD
+- Advanced load balancing (weighted, sticky sessions)
+- Connection pooling and request batching
 - Iroh P2P tunnels for non-VPC connectivity
 
 ## Architecture
@@ -121,26 +133,78 @@ Defines external ingress into VPC networks via the router-gateway.
 ### VPCEgress
 Controls outbound traffic from VPCs to external services.
 
+## Router Gateway
+
+The `router-gateway` is the Layer 7 HTTP/1.1 gateway that:
+
+### Features
+- **HTTP/1.1 Server**: Listens on port 8080 with Hyper 1.0 async architecture
+- **Request Routing**: Matches incoming HTTP requests against VPCRoute resources
+- **Path Matching**: Supports exact, prefix, and wildcard path matching:
+  - Exact: `/api/v1/users` matches only `/api/v1/users`
+  - Prefix: `/api/v1/` matches `/api/v1/users`, `/api/v1/posts`, etc.
+  - Wildcard: `/api/v1/*` matches anything under `/api/v1/`
+- **HTTP Methods**: Supports GET, POST, PUT, DELETE, PATCH, OPTIONS, and custom methods
+- **Header Matching**: Can match on HTTP headers (prepared for Phase 3)
+- **Load Balancing**: 4 strategies for endpoint selection:
+  - **Round-Robin**: Evenly distribute traffic across all endpoints
+  - **Least Connections**: Route to endpoint with fewest active connections
+  - **Source IP Hash**: Sticky sessions - same client always routes to same endpoint
+  - **Consistent Hash**: Hash-based routing for distributed caching
+
+### Request Flow
+```
+Client Request
+    ↓
+router-gateway (/healthz → 200 OK)
+    ↓
+VPCRoute Match (path/method/headers)
+    ↓
+Load Balancer Selection (pick endpoint)
+    ↓
+Service Registry Lookup (get IP:port)
+    ↓
+Galactic VPC (Layer 3 transparent routing)
+    ↓
+Backend Service Response
+```
+
+### Configuration
+Gateway behavior is controlled via:
+- **ConfigMap**: Default timeouts, load balancing strategy
+- **VPCRoute Resources**: Dynamic routing rules created by users
+- **VPCService Resources**: Backend service definitions
+- **Environment Variables**: Logging level via `RUST_LOG`
+
 ## Project Structure
 
 ```
 router/
 ├── Cargo.toml (workspace)
 ├── bin/
-│   ├── router-controller/     # CRD controllers (VPCService, VPCRoute, etc.)
-│   ├── router-gateway/        # Layer 7 HTTP/gRPC gateway
-│   ├── service-discovery/     # Cross-VPC service discovery daemon
-│   └── tunnel-gateway/        # Iroh tunnel termination (optional)
+│   ├── router-controller/           # Multi-controller orchestration
+│   │   ├── vpc_service_controller.rs # VPCService reconciliation
+│   │   ├── vpc_route_controller.rs   # VPCRoute reconciliation
+│   │   └── vpc_ingress_controller.rs # VPCIngress reconciliation (Phase 2)
+│   ├── router-gateway/              # Layer 7 HTTP/1.1 gateway (Phase 2)
+│   │   ├── main.rs                  # HTTP server and request handling
+│   │   └── router.rs                # Path/method matching logic
+│   ├── service-discovery/           # Cross-VPC service discovery daemon
+│   └── tunnel-gateway/              # Iroh tunnel termination (optional)
 ├── lib/
 │   ├── router-api/           # CRD types and Galactic VPC bindings
 │   ├── router-core/          # Service registry, endpoint management
 │   ├── router-galactic/      # Galactic VPC integration
-│   ├── router-proxy/         # HTTP/gRPC proxy implementation
+│   ├── router-proxy/         # HTTP proxy + load balancing (Phase 2)
+│   │   ├── http.rs           # HTTP proxy implementation
+│   │   └── load_balancer.rs  # 4 load balancing strategies
 │   └── router-tunnel/        # Tunnel management
 ├── manifests/
 │   ├── crds/                 # Kubernetes CRD definitions
 │   ├── rbac/                 # Service account and RBAC
-│   ├── deployments/          # Controller and gateway deployments
+│   ├── deployments/
+│   │   ├── router-controller.yaml  # Controllers + service-discovery
+│   │   └── router-gateway.yaml     # Gateway deployment (Phase 2)
 │   └── examples/             # Example VPCService, VPCRoute, etc.
 └── docs/
 ```
@@ -162,16 +226,44 @@ kubectl apply -f manifests/crds/
 kubectl apply -f manifests/rbac/rbac.yaml
 ```
 
-2. **Deploy the router controller and service discovery:**
+2. **Deploy the router controllers (VPCService, VPCRoute, VPCIngress) and service discovery:**
 
 ```bash
 kubectl apply -f manifests/deployments/router-controller.yaml
 ```
 
-3. **Deploy an example VPCService and VPCRoute:**
+3. **Deploy the router-gateway (Layer 7 HTTP gateway):**
+
+```bash
+kubectl apply -f manifests/deployments/router-gateway.yaml
+```
+
+4. **Deploy example VPCServices and VPCRoutes:**
 
 ```bash
 kubectl apply -f manifests/examples/basic-example.yaml
+```
+
+### Gateway Setup
+
+The `router-gateway` deployment includes:
+- **2 replicas** for high availability
+- **Service ClusterIP** on port 8080 for internal routing
+- **VPCAttachment integration** via annotation `galactic.datumapis.com/vpc: "default"` - automatically joins pods to Galactic VPC
+- **Health check endpoints**: `/healthz` for liveness/readiness probes
+- **Resource limits**: 200m-1000m CPU, 256Mi-1Gi memory
+- **Security context**: Non-root user with read-only filesystem
+- **Pod anti-affinity**: Spread replicas across nodes
+
+To customize the gateway (e.g., different VPC, port, replicas):
+
+```bash
+# Edit the deployment
+kubectl edit deployment router-gateway -n datum-router
+
+# Or patch specific values
+kubectl patch deployment router-gateway -n datum-router \
+  -p '{"spec":{"replicas":3}}'
 ```
 
 ### Building from Source
@@ -256,12 +348,74 @@ Example: A request to `/api/v1/users` can be routed to a backend service running
 - Request routed to backend VPCService IP (which could be in GCP, Azure, or on-prem)
 - Galactic VPC's SRv6 transparently handles the cross-cloud routing
 
+## Load Balancing Strategies
+
+The `router-gateway` supports 4 load balancing strategies for distributing traffic across backend endpoints:
+
+### Round-Robin (Default)
+Distributes requests evenly across all healthy endpoints in a circular pattern.
+```
+Request 1 → Endpoint 1
+Request 2 → Endpoint 2
+Request 3 → Endpoint 3
+Request 4 → Endpoint 1 (circle back)
+```
+**Use case**: General-purpose traffic distribution, works well with stateless services
+
+### Least Connections
+Routes each request to the endpoint with the fewest active connections.
+```
+Endpoint 1: 5 connections
+Endpoint 2: 3 connections ← New request goes here
+Endpoint 3: 4 connections
+```
+**Use case**: Services with long-lived connections or varying request durations
+
+### Source IP Hash
+Uses a hash of the client's source IP to select an endpoint.
+```
+Client A (IP: 10.0.0.5) → Hash → Endpoint 2 (always)
+Client B (IP: 10.0.0.6) → Hash → Endpoint 1 (always)
+Client C (IP: 10.0.0.7) → Hash → Endpoint 3 (always)
+```
+**Use case**: Sticky sessions, maintaining client affinity for stateful applications
+
+### Consistent Hash
+Uses a hash key to select endpoints in a way that minimizes remapping on endpoint changes.
+```
+Hash Key: "/api/v1/users/123"
+Consistent Hash → Endpoint 2
+(If Endpoint 2 fails, only requests with similar hash keys remap)
+```
+**Use case**: Cache-like scenarios where maintaining mapping is important
+
+Configure load balancing strategy in VPCRoute:
+```yaml
+spec:
+  loadBalancing: round-robin  # Can also be: least-connections, source-ip-hash, consistent-hash
+```
+
 ## Development
 
 ### Running Tests
 
 ```bash
 cargo test
+```
+
+### Testing the Router Module
+
+The `router` module includes comprehensive unit tests for path and method matching:
+
+```bash
+# Run tests for the router module
+cargo test router::
+
+# Specific tests
+cargo test router::test_exact_path_match
+cargo test router::test_prefix_path_match
+cargo test router::test_wildcard_path_match
+cargo test router::test_method_match
 ```
 
 ### Building Docker Images
@@ -300,28 +454,41 @@ RUST_LOG=router=info cargo run
 ## Status and Roadmap
 
 ### Phase 1: Complete ✅
-- [x] CRD definitions
-- [x] Galactic VPC integration
-- [x] Service registry
-- [x] Router controller
-- [x] Service discovery daemon
-- [x] Kubernetes manifests
+- [x] CRD definitions (VPCService, VPCRoute, ServiceBinding, VPCIngress, VPCEgress)
+- [x] Galactic VPC integration and discovery
+- [x] Service registry with endpoint management
+- [x] Router controller with reconciliation framework
+- [x] Service discovery daemon for cross-VPC discovery
+- [x] Kubernetes manifests (CRDs, RBAC, deployments)
 - [x] Example configurations
 
-### Phase 2: In Progress 🚀
-- [ ] HTTP/gRPC gateway implementation
-- [ ] Request routing logic
-- [ ] Load balancing algorithms
-- [ ] Health checking
-- [ ] TLS termination
+### Phase 2: Complete ✅
+- [x] HTTP/1.1 gateway server (`router-gateway` binary)
+- [x] Request routing and path/header/method matching
+- [x] Load balancing (4 strategies: round-robin, least-connections, source-IP hash, consistent hash)
+- [x] VPCRoute controller with full reconciliation
+- [x] VPCIngress controller for external ingress
+- [x] Router module with configurable matching logic
+- [x] Service endpoint discovery and selection
+- [x] VPCAttachment integration for VPC networking
+- [x] Multi-controller orchestration in router-controller
+- [x] Deployment manifests with HA configuration (2+ replicas)
 
-### Phase 3: Planned 🔮
-- [ ] Traffic policies
-- [ ] Circuit breaking
+### Phase 3: Upcoming 🚀
+- [ ] Health checking and endpoint monitoring
+- [ ] Actual HTTP request body forwarding and proxying
+- [ ] TLS termination for HTTPS
+- [ ] Traffic policies (timeouts, retries, circuit breaking)
+- [ ] Request/response middleware support
+- [ ] Basic observability (structured logging, simple metrics)
+
+### Phase 4: Future 🔮
 - [ ] mTLS between services
-- [ ] Observability (metrics, traces)
-- [ ] Geographic routing
-- [ ] Iroh P2P tunnel support
+- [ ] Advanced observability (Prometheus metrics, distributed tracing)
+- [ ] Geographic routing based on Location CRD
+- [ ] Advanced load balancing (weighted, sticky sessions)
+- [ ] Connection pooling and request batching
+- [ ] Iroh P2P tunnel support for non-VPC connectivity
 
 ## Contributing
 
