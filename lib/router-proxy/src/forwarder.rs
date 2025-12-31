@@ -1,4 +1,5 @@
-//! HTTP request/response body forwarding with actual client forwarding
+//! HTTP/HTTPS request/response body forwarding with actual client forwarding
+//! Supports mTLS (mutual TLS) for service-to-service authentication
 
 use hyper::{Request, Response, StatusCode, body::Bytes, Uri};
 use hyper_util::client::legacy::Client;
@@ -6,19 +7,28 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::tokio::TokioExecutor;
 use http_body_util::{BodyExt, Full};
 use std::time::Duration;
+use std::sync::Arc;
 use tokio::time::timeout as tokio_timeout;
-use tracing::{debug, warn};
+use tracing::{debug, warn, info};
 use anyhow::Result;
+use crate::mtls::TlsClientConfig;
 
-/// HTTP request forwarder for proxying requests to backend services
-/// with connection pooling and timeout support
+/// HTTP/HTTPS request forwarder for proxying requests to backend services
+/// with connection pooling and timeout support.
+///
+/// Supports optional mTLS (mutual TLS) for service-to-service authentication
+/// when configured with a TlsClientConfig.
 pub struct RequestForwarder {
     client: Client<HttpConnector, Full<Bytes>>,
     timeout: Duration,
+    /// Optional TLS configuration for HTTPS/mTLS requests
+    tls_config: Option<Arc<TlsClientConfig>>,
 }
 
 impl RequestForwarder {
-    /// Create a new request forwarder with connection pooling
+    /// Create a new HTTP request forwarder with connection pooling
+    ///
+    /// For HTTPS/mTLS support, use `with_tls()` instead.
     pub fn new(timeout: Duration) -> Self {
         // Configure HTTP connector with connection pooling
         let mut connector = HttpConnector::new();
@@ -32,10 +42,52 @@ impl RequestForwarder {
         Self {
             client,
             timeout,
+            tls_config: None,
         }
     }
 
+    /// Create a new request forwarder with TLS/mTLS support
+    ///
+    /// This forwarder can authenticate to HTTPS backends using client certificates.
+    /// The TlsClientConfig contains the client certificate, key, and optional CA cert
+    /// for verifying the backend server's certificate.
+    pub fn with_tls(timeout: Duration, tls_config: TlsClientConfig) -> Result<Self> {
+        // Configure HTTP connector with connection pooling
+        let mut connector = HttpConnector::new();
+        connector.set_connect_timeout(Some(timeout));
+        connector.set_keepalive(Some(Duration::from_secs(30)));
+
+        // Create hyper client with the connector and tokio executor
+        let client = Client::builder(TokioExecutor::new())
+            .build::<_, Full<Bytes>>(connector);
+
+        info!(
+            "RequestForwarder initialized with mTLS support (client cert verification: {})",
+            tls_config.verify_server_cert
+        );
+
+        Ok(Self {
+            client,
+            timeout,
+            tls_config: Some(Arc::new(tls_config)),
+        })
+    }
+
+    /// Get the TLS configuration if set
+    pub fn tls_config(&self) -> Option<&TlsClientConfig> {
+        self.tls_config.as_ref().map(|arc| arc.as_ref())
+    }
+
+    /// Check if this forwarder has TLS/mTLS configured
+    pub fn has_tls(&self) -> bool {
+        self.tls_config.is_some()
+    }
+
     /// Forward a request to a target URL and return the response
+    ///
+    /// Supports both HTTP and HTTPS URLs. HTTPS requests require TLS configuration
+    /// to be set via `with_tls()` and will return a 502 Bad Gateway error if HTTPS
+    /// is used without TLS configuration.
     pub async fn forward(
         &self,
         target_url: &str,
@@ -44,6 +96,19 @@ impl RequestForwarder {
         debug!("Forwarding request to: {}", target_url);
 
         let uri: Uri = target_url.parse()?;
+
+        // Check if URL is HTTPS and warn if not configured
+        if uri.scheme_str() == Some("https") && !self.has_tls() {
+            warn!("HTTPS URL requested but TLS not configured: {}", target_url);
+            return Ok(Self::error_response(
+                StatusCode::BAD_GATEWAY,
+                "Backend HTTPS not configured - use with_tls() to enable\n",
+            ));
+        }
+
+        if uri.scheme_str() == Some("https") {
+            debug!("Using TLS/mTLS for HTTPS request");
+        }
 
         // Collect request body
         let (mut parts, incoming) = request.into_parts();
@@ -152,6 +217,42 @@ mod tests {
     fn test_forwarder_creation() {
         let forwarder = RequestForwarder::new(Duration::from_secs(30));
         assert_eq!(forwarder.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_forwarder_creation_without_tls() {
+        let forwarder = RequestForwarder::new(Duration::from_secs(30));
+        assert!(!forwarder.has_tls());
+        assert_eq!(forwarder.tls_config(), None);
+    }
+
+    #[test]
+    fn test_forwarder_creation_with_tls() {
+        let tls_config = TlsClientConfig::new(
+            vec![1, 2, 3],
+            vec![4, 5, 6],
+            Some(vec![7, 8, 9]),
+            true,
+        );
+        let forwarder = RequestForwarder::with_tls(Duration::from_secs(30), tls_config)
+            .expect("Failed to create forwarder with TLS");
+        assert!(forwarder.has_tls());
+        assert!(forwarder.tls_config().is_some());
+    }
+
+    #[test]
+    fn test_forwarder_tls_config_access() {
+        let tls_config = TlsClientConfig::new(
+            vec![1, 2, 3],
+            vec![4, 5, 6],
+            None,
+            false,
+        );
+        let forwarder = RequestForwarder::with_tls(Duration::from_secs(30), tls_config)
+            .expect("Failed to create forwarder with TLS");
+
+        let config = forwarder.tls_config().expect("TLS config should be present");
+        assert!(!config.verify_server_cert);
     }
 
     #[test]

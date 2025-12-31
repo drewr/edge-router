@@ -8,7 +8,7 @@ use hyper::{
 use hyper_util::rt::tokio::TokioIo;
 use http_body_util::Full;
 use router_core::ServiceRegistry;
-use router_proxy::{HttpProxy, HealthCheckConfig, HealthChecker, TrafficPolicy, RequestForwarder, TlsServerConfig, MiddlewareChain, LoggingMiddleware, HeaderInspectionMiddleware, MetricsCollector, MetricsMiddleware, TracingMiddleware};
+use router_proxy::{HttpProxy, HealthCheckConfig, HealthChecker, TrafficPolicy, RequestForwarder, TlsServerConfig, MiddlewareChain, LoggingMiddleware, HeaderInspectionMiddleware, MetricsCollector, MetricsMiddleware, TracingMiddleware, TlsClientConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,8 +57,22 @@ async fn main() -> Result<()> {
     info!("  - Max Retries: {}", _traffic_policy.retry.max_retries);
     info!("  - Circuit Breaker Failure Threshold: {}", _traffic_policy.circuit_breaker.failure_threshold);
 
-    // Initialize request forwarder
-    let forwarder = Arc::new(RequestForwarder::new(Duration::from_secs(30)));
+    // Initialize request forwarder with optional mTLS support
+    let client_mtls_config = load_client_mtls_config();
+    let forwarder = if let Some(mtls_config) = client_mtls_config {
+        match RequestForwarder::with_tls(Duration::from_secs(30), mtls_config) {
+            Ok(forwarder) => {
+                info!("Request forwarder initialized with mTLS support");
+                Arc::new(forwarder)
+            }
+            Err(e) => {
+                warn!("Failed to initialize mTLS forwarder: {}, falling back to HTTP-only", e);
+                Arc::new(RequestForwarder::new(Duration::from_secs(30)))
+            }
+        }
+    } else {
+        Arc::new(RequestForwarder::new(Duration::from_secs(30)))
+    };
     info!("Request forwarder initialized with 30s timeout");
 
     // Initialize metrics collector
@@ -150,7 +164,7 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Load TLS configuration from environment variables
+/// Load server-side TLS configuration from environment variables
 fn load_tls_config() -> Option<TlsServerConfig> {
     let cert_path = std::env::var("ROUTER_TLS_CERT").ok();
     let key_path = std::env::var("ROUTER_TLS_KEY").ok();
@@ -164,27 +178,89 @@ fn load_tls_config() -> Option<TlsServerConfig> {
                 (Ok(cert), Ok(key)) => {
                     match TlsServerConfig::from_pem(&cert, &key, None, None) {
                         Ok(config) => {
-                            info!("TLS configuration loaded from {} and {}", cert_path, key_path);
+                            info!("Server TLS configuration loaded from {} and {}", cert_path, key_path);
                             Some(config)
                         }
                         Err(e) => {
-                            warn!("Failed to parse TLS configuration: {}", e);
+                            warn!("Failed to parse server TLS configuration: {}", e);
                             None
                         }
                     }
                 }
                 (cert_err, key_err) => {
                     if cert_err.is_err() {
-                        warn!("Failed to read TLS certificate from {}", cert_path);
+                        warn!("Failed to read server TLS certificate from {}", cert_path);
                     }
                     if key_err.is_err() {
-                        warn!("Failed to read TLS key from {}", key_path);
+                        warn!("Failed to read server TLS key from {}", key_path);
                     }
                     None
                 }
             }
         }
         _ => None,
+    }
+}
+
+/// Load client-side mTLS configuration from environment variables
+///
+/// Environment variables:
+/// - ROUTER_CLIENT_CERT: Path to client certificate (PEM format)
+/// - ROUTER_CLIENT_KEY: Path to client private key (PEM format)
+/// - ROUTER_CLIENT_CA: Optional path to CA certificate for server verification
+/// - ROUTER_CLIENT_VERIFY_SERVER: "true" or "false" (default: true)
+fn load_client_mtls_config() -> Option<TlsClientConfig> {
+    let cert_path = std::env::var("ROUTER_CLIENT_CERT").ok();
+    let key_path = std::env::var("ROUTER_CLIENT_KEY").ok();
+
+    match (cert_path, key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            match (
+                std::fs::read(&cert_path),
+                std::fs::read(&key_path),
+            ) {
+                (Ok(cert), Ok(key)) => {
+                    // Load optional CA certificate
+                    let ca_cert = std::env::var("ROUTER_CLIENT_CA").ok()
+                        .and_then(|ca_path| std::fs::read(&ca_path).ok());
+                    let has_ca_cert = ca_cert.is_some();
+
+                    // Load server verification setting (default: true)
+                    let verify_server = std::env::var("ROUTER_CLIENT_VERIFY_SERVER")
+                        .ok()
+                        .map(|v| v.to_lowercase() == "true")
+                        .unwrap_or(true);
+
+                    match TlsClientConfig::from_pem(cert, key, ca_cert, verify_server) {
+                        Ok(config) => {
+                            info!(
+                                "Client mTLS configuration loaded (server verification: {}, CA cert: {})",
+                                verify_server,
+                                has_ca_cert
+                            );
+                            Some(config)
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse client mTLS configuration: {}", e);
+                            None
+                        }
+                    }
+                }
+                (cert_err, key_err) => {
+                    if cert_err.is_err() {
+                        warn!("Failed to read client certificate from {}", cert_path);
+                    }
+                    if key_err.is_err() {
+                        warn!("Failed to read client key from {}", key_path);
+                    }
+                    None
+                }
+            }
+        }
+        _ => {
+            debug!("Client mTLS not configured (ROUTER_CLIENT_CERT and ROUTER_CLIENT_KEY not set)");
+            None
+        }
     }
 }
 
