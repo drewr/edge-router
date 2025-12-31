@@ -19,7 +19,11 @@ pub use policy::{
 };
 pub use forwarder::RequestForwarder;
 pub use tls::{TlsServerConfig, CertificateMaterial};
-pub use mtls::{ClientAuthMode, TlsClientConfig, MtlsClientVerifier};
+pub use mtls::{
+    ClientAuthMode, TlsClientConfig, MtlsClientVerifier,
+    CertificateMetadata, CertificatePinner, CertificateValidationResult,
+    calculate_cert_fingerprint
+};
 pub use middleware::{Middleware, MiddlewareChain, MiddlewareContext, LoggingMiddleware, HeaderInspectionMiddleware};
 pub use metrics::{MetricsCollector, MetricsMiddleware};
 pub use tracing::TracingMiddleware;

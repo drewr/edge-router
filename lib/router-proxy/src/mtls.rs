@@ -1,10 +1,14 @@
 //! mTLS (Mutual TLS) support for client certificate validation and service authentication
+//!
+//! Phase 4.8: Advanced certificate validation with metadata extraction and pinning
 
 use rustls::pki_types::CertificateDer;
 use rustls_pemfile::certs;
 use std::io::BufReader;
+use std::collections::HashMap;
 use anyhow::{Result, anyhow};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Client authentication mode for incoming TLS connections
 #[derive(Clone, Debug, PartialEq)]
@@ -130,6 +134,173 @@ impl MtlsClientVerifier {
     }
 }
 
+/// Extracted metadata from an X.509 certificate
+#[derive(Clone, Debug, PartialEq)]
+pub struct CertificateMetadata {
+    /// Certificate's Common Name (CN)
+    pub common_name: Option<String>,
+    /// Subject Alternative Names (SANs)
+    pub subject_alt_names: Vec<String>,
+    /// Not before timestamp (seconds since epoch)
+    pub not_before: u64,
+    /// Not after timestamp (seconds since epoch)
+    pub not_after: u64,
+    /// Issuer's Common Name
+    pub issuer_cn: Option<String>,
+    /// SHA256 fingerprint of the certificate (hex-encoded)
+    pub sha256_fingerprint: String,
+}
+
+impl CertificateMetadata {
+    /// Check if the certificate is currently valid (not expired)
+    pub fn is_valid_now(&self) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        now >= self.not_before && now <= self.not_after
+    }
+
+    /// Get days until certificate expiration (or negative if already expired)
+    pub fn days_until_expiry(&self) -> i32 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let seconds_until_expiry = (self.not_after as i64) - (now as i64);
+        (seconds_until_expiry / 86400) as i32
+    }
+}
+
+/// Certificate pinning configuration for service-to-service authentication
+#[derive(Clone, Debug, PartialEq)]
+pub struct CertificatePinner {
+    /// Map of service names to acceptable certificate SHA256 fingerprints
+    /// Multiple fingerprints per service (for key rotation)
+    pins: HashMap<String, Vec<String>>,
+}
+
+impl CertificatePinner {
+    /// Create a new empty certificate pinner
+    pub fn new() -> Self {
+        Self {
+            pins: HashMap::new(),
+        }
+    }
+
+    /// Add a certificate pin for a service
+    /// Multiple pins per service support key rotation
+    pub fn add_pin(&mut self, service: String, fingerprint: String) {
+        debug!("Added certificate pin for service: {}", service);
+        self.pins
+            .entry(service)
+            .or_insert_with(Vec::new)
+            .push(fingerprint);
+    }
+
+    /// Load pins from a map (useful for environment-based config)
+    pub fn load_from_map(pin_map: HashMap<String, Vec<String>>) -> Self {
+        info!("Loaded {} certificate pins", pin_map.len());
+        Self { pins: pin_map }
+    }
+
+    /// Verify a certificate against pinned fingerprints for a service
+    pub fn verify(&self, service: &str, fingerprint: &str) -> Result<()> {
+        match self.pins.get(service) {
+            Some(allowed_fingerprints) => {
+                if allowed_fingerprints.contains(&fingerprint.to_string()) {
+                    debug!("Certificate pin verified for service: {}", service);
+                    Ok(())
+                } else {
+                    warn!("Certificate pin verification failed for service: {} (fingerprint mismatch)", service);
+                    Err(anyhow!(
+                        "Certificate pin mismatch for service {}: fingerprint not in pin list",
+                        service
+                    ))
+                }
+            }
+            None => {
+                // No pins configured for this service, allow it
+                debug!("No certificate pins configured for service: {}", service);
+                Ok(())
+            }
+        }
+    }
+
+    /// Get the number of services with pinned certificates
+    pub fn service_count(&self) -> usize {
+        self.pins.len()
+    }
+
+    /// Check if pins are configured for a specific service
+    pub fn has_pins_for_service(&self, service: &str) -> bool {
+        self.pins.contains_key(service)
+    }
+}
+
+impl Default for CertificatePinner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Certificate validation result with detailed information
+#[derive(Clone, Debug, PartialEq)]
+pub struct CertificateValidationResult {
+    /// Whether the certificate passed validation
+    pub valid: bool,
+    /// Certificate metadata
+    pub metadata: Option<CertificateMetadata>,
+    /// Validation errors (if any)
+    pub errors: Vec<String>,
+    /// Validation warnings (e.g., expiring soon)
+    pub warnings: Vec<String>,
+}
+
+impl CertificateValidationResult {
+    /// Create a successful validation result
+    pub fn success(metadata: CertificateMetadata) -> Self {
+        Self {
+            valid: true,
+            metadata: Some(metadata),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Create a failed validation result
+    pub fn failure(error: String) -> Self {
+        Self {
+            valid: false,
+            metadata: None,
+            errors: vec![error],
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Add a warning to the validation result
+    pub fn add_warning(&mut self, warning: String) {
+        self.warnings.push(warning);
+    }
+
+    /// Add an error to the validation result
+    pub fn add_error(&mut self, error: String) {
+        self.errors.push(error);
+        self.valid = false;
+    }
+}
+
+/// Calculate SHA256 fingerprint of a certificate (hex-encoded)
+pub fn calculate_cert_fingerprint(cert_der: &CertificateDer) -> String {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(&cert_der.as_ref());
+    let hash = hasher.finalize();
+    hex::encode(hash)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +370,191 @@ mod tests {
         let verifier = MtlsClientVerifier::new(cert_data.clone());
         let certs = verifier.ca_certificates();
         assert_eq!(certs.len(), 1);
+    }
+
+    // Phase 4.8: Advanced Certificate Validation Tests
+
+    #[test]
+    fn test_certificate_metadata_creation() {
+        let metadata = CertificateMetadata {
+            common_name: Some("example.com".to_string()),
+            subject_alt_names: vec!["www.example.com".to_string(), "api.example.com".to_string()],
+            not_before: 1000000,
+            not_after: 2000000,
+            issuer_cn: Some("Let's Encrypt".to_string()),
+            sha256_fingerprint: "abc123def456".to_string(),
+        };
+
+        assert_eq!(metadata.common_name, Some("example.com".to_string()));
+        assert_eq!(metadata.subject_alt_names.len(), 2);
+        assert!(!metadata.sha256_fingerprint.is_empty());
+    }
+
+    #[test]
+    fn test_certificate_metadata_validity() {
+        // Create a metadata with validity in the past and future
+        let far_past = 1000000u64;
+        let far_future = 9999999999u64;
+
+        let metadata = CertificateMetadata {
+            common_name: None,
+            subject_alt_names: vec![],
+            not_before: far_past,
+            not_after: far_future,
+            issuer_cn: None,
+            sha256_fingerprint: "test".to_string(),
+        };
+
+        // Should be valid (assuming current time is between far_past and far_future)
+        assert!(metadata.is_valid_now());
+    }
+
+    #[test]
+    fn test_certificate_metadata_expiry() {
+        let metadata = CertificateMetadata {
+            common_name: None,
+            subject_alt_names: vec![],
+            not_before: 0,
+            not_after: 0,
+            issuer_cn: None,
+            sha256_fingerprint: "test".to_string(),
+        };
+
+        // Should be expired (not_after is 0)
+        assert!(!metadata.is_valid_now());
+        let days = metadata.days_until_expiry();
+        assert!(days < 0); // Already expired
+    }
+
+    #[test]
+    fn test_certificate_pinner_creation() {
+        let pinner = CertificatePinner::new();
+        assert_eq!(pinner.service_count(), 0);
+    }
+
+    #[test]
+    fn test_certificate_pinner_add_pin() {
+        let mut pinner = CertificatePinner::new();
+        pinner.add_pin("service-a".to_string(), "fingerprint1".to_string());
+        assert!(pinner.has_pins_for_service("service-a"));
+        assert!(!pinner.has_pins_for_service("service-b"));
+    }
+
+    #[test]
+    fn test_certificate_pinner_multiple_pins() {
+        let mut pinner = CertificatePinner::new();
+        pinner.add_pin("service-a".to_string(), "fingerprint1".to_string());
+        pinner.add_pin("service-a".to_string(), "fingerprint2".to_string());
+
+        // Should accept either fingerprint
+        assert!(pinner.verify("service-a", "fingerprint1").is_ok());
+        assert!(pinner.verify("service-a", "fingerprint2").is_ok());
+        assert!(pinner.verify("service-a", "fingerprint3").is_err());
+    }
+
+    #[test]
+    fn test_certificate_pinner_verify_success() {
+        let mut pinner = CertificatePinner::new();
+        pinner.add_pin("service-a".to_string(), "abc123".to_string());
+
+        let result = pinner.verify("service-a", "abc123");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_certificate_pinner_verify_failure() {
+        let mut pinner = CertificatePinner::new();
+        pinner.add_pin("service-a".to_string(), "abc123".to_string());
+
+        let result = pinner.verify("service-a", "wrong_fingerprint");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_certificate_pinner_no_pins_configured() {
+        let pinner = CertificatePinner::new();
+
+        // Should succeed when no pins are configured
+        let result = pinner.verify("service-a", "any_fingerprint");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_certificate_pinner_load_from_map() {
+        let mut pin_map = HashMap::new();
+        pin_map.insert("service-a".to_string(), vec!["fp1".to_string(), "fp2".to_string()]);
+        pin_map.insert("service-b".to_string(), vec!["fp3".to_string()]);
+
+        let pinner = CertificatePinner::load_from_map(pin_map);
+        assert_eq!(pinner.service_count(), 2);
+        assert!(pinner.has_pins_for_service("service-a"));
+        assert!(pinner.has_pins_for_service("service-b"));
+    }
+
+    #[test]
+    fn test_certificate_validation_result_success() {
+        let metadata = CertificateMetadata {
+            common_name: Some("test.com".to_string()),
+            subject_alt_names: vec![],
+            not_before: 0,
+            not_after: 9999999999,
+            issuer_cn: None,
+            sha256_fingerprint: "test".to_string(),
+        };
+
+        let result = CertificateValidationResult::success(metadata.clone());
+        assert!(result.valid);
+        assert_eq!(result.metadata, Some(metadata));
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_certificate_validation_result_failure() {
+        let result = CertificateValidationResult::failure("Test error".to_string());
+        assert!(!result.valid);
+        assert_eq!(result.metadata, None);
+        assert_eq!(result.errors.len(), 1);
+    }
+
+    #[test]
+    fn test_certificate_validation_result_with_warnings() {
+        let metadata = CertificateMetadata {
+            common_name: None,
+            subject_alt_names: vec![],
+            not_before: 0,
+            not_after: 9999999999,
+            issuer_cn: None,
+            sha256_fingerprint: "test".to_string(),
+        };
+
+        let mut result = CertificateValidationResult::success(metadata);
+        result.add_warning("Certificate expires in 30 days".to_string());
+
+        assert!(result.valid);
+        assert_eq!(result.warnings.len(), 1);
+    }
+
+    #[test]
+    fn test_certificate_fingerprint_consistency() {
+        let cert = CertificateDer::from(vec![1, 2, 3, 4, 5]);
+        let fp1 = calculate_cert_fingerprint(&cert);
+        let fp2 = calculate_cert_fingerprint(&cert);
+
+        // Should be deterministic
+        assert_eq!(fp1, fp2);
+        // Should be hex-encoded
+        assert!(fp1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_certificate_fingerprint_different() {
+        let cert1 = CertificateDer::from(vec![1, 2, 3]);
+        let cert2 = CertificateDer::from(vec![4, 5, 6]);
+
+        let fp1 = calculate_cert_fingerprint(&cert1);
+        let fp2 = calculate_cert_fingerprint(&cert2);
+
+        // Different certificates should have different fingerprints
+        assert_ne!(fp1, fp2);
     }
 }
