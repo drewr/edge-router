@@ -279,17 +279,35 @@ Total: 4 release binaries + 5 libraries
    - Comprehensive logging of TLS state
    - Unit tests for version validation
 
-### 🚀 Phase 4.4 & Beyond
+### ✅ Phase 4.4: Complete
 
-1. **mTLS Support** - Mutual TLS between services:
+1. **Middleware Hooks Framework** - Extensible request/response processing:
+   - Middleware trait with async hooks (on_request, on_response, on_error)
+   - MiddlewareContext for passing data through middleware chain
+   - MiddlewareChain for composing multiple middleware
+   - Support for custom metadata in middleware context
+   - LoggingMiddleware with request/response timing
+   - HeaderInspectionMiddleware for header inspection
+   - Integration into HTTP and HTTPS request handlers
+   - Full async/await support with proper error handling
+   - Unit tests for all middleware components
+
+### 🚀 Phase 4.5 & Beyond
+
+1. **Prometheus Metrics** - Observable metrics collection:
+   - Request count and latency histograms
+   - Error rates and backend health
+   - Prometheus exposition format
+
+2. **Distributed Tracing** - OpenTelemetry integration:
+   - Request tracing across services
+   - Span creation for middleware and request handling
+   - Trace propagation
+
+3. **mTLS Support** - Mutual TLS between services:
    - Client certificate validation
    - Service-to-service authentication
    - Certificate chain verification
-
-2. **Middleware & Observability**:
-   - Request/response middleware hooks
-   - Prometheus metrics
-   - Distributed tracing with OpenTelemetry
 
 ## Usage
 
@@ -363,7 +381,7 @@ cargo run --release -p service-discovery
 
 ## Conclusion
 
-Phases 1-4.3 complete! The router is production-ready with full HTTPS support:
+Phases 1-4.4 complete! The router is production-ready with full observability support:
 - ✅ Fully type-safe with Rust
 - ✅ Kubernetes-native with proper CRDs
 - ✅ Galactic VPC-aware and integrated
@@ -379,7 +397,11 @@ Phases 1-4.3 complete! The router is production-ready with full HTTPS support:
 - ✅ TLS/HTTPS support with rustls
 - ✅ Dual HTTP/HTTPS listeners (8080/8443)
 - ✅ Environment-based certificate loading
-- 🚀 Ready for Phase 4.4 mTLS and observability
+- ✅ Middleware hooks framework for extensible processing
+- ✅ Request/response logging middleware
+- ✅ Header inspection middleware
+- ✅ Extensible composition pattern for custom middleware
+- 🚀 Ready for Phase 4.5 Prometheus metrics and distributed tracing
 
 The architecture cleanly separates concerns between:
 - **Layer 3**: Galactic VPC (packet routing via SRv6)
@@ -398,5 +420,5 @@ This enables developers to create multi-cloud applications with enterprise-grade
 ---
 
 **Last Updated**: 2025-12-31
-**Status**: Phase 4.3 Complete - HTTPS Support with TLS Termination
-**Next Milestone**: mTLS and observability (Phase 4.4)
+**Status**: Phase 4.4 Complete - Observability with Middleware Hooks
+**Next Milestone**: Prometheus metrics and distributed tracing (Phase 4.5)

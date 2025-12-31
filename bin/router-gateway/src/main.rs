@@ -8,7 +8,7 @@ use hyper::{
 use hyper_util::rt::tokio::TokioIo;
 use http_body_util::Full;
 use router_core::ServiceRegistry;
-use router_proxy::{HttpProxy, HealthCheckConfig, HealthChecker, TrafficPolicy, RequestForwarder, TlsServerConfig};
+use router_proxy::{HttpProxy, HealthCheckConfig, HealthChecker, TrafficPolicy, RequestForwarder, TlsServerConfig, MiddlewareChain, LoggingMiddleware, HeaderInspectionMiddleware};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,6 +61,18 @@ async fn main() -> Result<()> {
     let forwarder = Arc::new(RequestForwarder::new(Duration::from_secs(30)));
     info!("Request forwarder initialized with 30s timeout");
 
+    // Initialize middleware chain
+    let middleware = Arc::new(
+        MiddlewareChain::new()
+            .add(LoggingMiddleware)
+            .add(HeaderInspectionMiddleware::new(vec![
+                "content-type".to_string(),
+                "authorization".to_string(),
+                "user-agent".to_string(),
+            ]))
+    );
+    info!("Middleware chain initialized with logging and header inspection");
+
     // Try to load TLS configuration from environment or default
     let tls_config = load_tls_config();
     let tls_acceptor = tls_config.as_ref().map(|config| {
@@ -82,12 +94,14 @@ async fn main() -> Result<()> {
         let proxy = proxy.clone();
         let router = router.clone();
         let forwarder = forwarder.clone();
+        let middleware = middleware.clone();
 
         tokio::task::spawn(accept_https_connections(
             https_listener,
             proxy,
             router,
             forwarder,
+            middleware,
             tls_acceptor.unwrap(),
         ));
     } else {
@@ -103,13 +117,15 @@ async fn main() -> Result<()> {
         let proxy = proxy.clone();
         let router = router.clone();
         let forwarder = forwarder.clone();
+        let middleware = middleware.clone();
 
         tokio::task::spawn(async move {
             let service = service_fn(move |req| {
                 let proxy = proxy.clone();
                 let router = router.clone();
                 let forwarder = forwarder.clone();
-                handle_request(req, proxy, router, forwarder)
+                let middleware = middleware.clone();
+                handle_request(req, proxy, router, forwarder, middleware)
             });
 
             if let Err(e) = http1::Builder::new()
@@ -166,6 +182,7 @@ async fn accept_https_connections(
     proxy: Arc<HttpProxy>,
     router: Arc<Router>,
     forwarder: Arc<RequestForwarder>,
+    middleware: Arc<MiddlewareChain>,
     tls_acceptor: TlsAcceptor,
 ) {
     loop {
@@ -175,6 +192,7 @@ async fn accept_https_connections(
                 let proxy = proxy.clone();
                 let router = router.clone();
                 let forwarder = forwarder.clone();
+                let middleware = middleware.clone();
 
                 tokio::task::spawn(async move {
                     match tls_acceptor.accept(stream).await {
@@ -184,7 +202,8 @@ async fn accept_https_connections(
                                 let proxy = proxy.clone();
                                 let router = router.clone();
                                 let forwarder = forwarder.clone();
-                                handle_request(req, proxy, router, forwarder)
+                                let middleware = middleware.clone();
+                                handle_request(req, proxy, router, forwarder, middleware)
                             });
 
                             if let Err(e) = http1::Builder::new()
@@ -212,40 +231,80 @@ async fn handle_request(
     _proxy: Arc<HttpProxy>,
     _router: Arc<Router>,
     forwarder: Arc<RequestForwarder>,
+    middleware: Arc<MiddlewareChain>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
+    use router_proxy::MiddlewareContext;
+
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
     debug!("{} {}", method, path);
 
+    // Create middleware context
+    let context = MiddlewareContext::from_request(&req);
+
+    // Call on_request middleware hooks
+    if let Err(e) = middleware.on_request(&context).await {
+        debug!("Middleware on_request error: {}", e);
+    }
+
     // Health check endpoint
     if path == "/healthz" {
-        return Ok(Response::builder()
+        let response = Response::builder()
             .status(StatusCode::OK)
             .body(Full::new(Bytes::from("OK\n")))
-            .unwrap());
+            .unwrap();
+
+        if let Err(e) = middleware.on_response(&context, 200).await {
+            debug!("Middleware on_response error: {}", e);
+        }
+
+        return Ok(response);
     }
 
     // Route the request based on VPCRoute rules
     // Phase 2: Basic routing is available in Router module
     // Phase 3: Health checks and policies are ready
     // Phase 4.2: Using RequestForwarder for actual HTTP forwarding
+    // Phase 4.4: Middleware hooks integrated
 
     debug!("Processing request: {} {}", method, path);
 
     // Use forwarder to forward the request
-    match forwarder.forward("http://backend-service:8080", req).await {
+    let result = match forwarder.forward("http://backend-service:8080", req).await {
         Ok(response) => {
             // Convert response body to Full<Bytes>
             let (parts, body) = response.into_parts();
-            Ok(Response::from_parts(parts, Full::new(body)))
+            let status = parts.status.as_u16();
+            let response = Response::from_parts(parts, Full::new(body));
+
+            // Call on_response middleware hooks
+            if let Err(e) = middleware.on_response(&context, status).await {
+                debug!("Middleware on_response error: {}", e);
+            }
+
+            Ok(response)
         }
         Err(e) => {
             debug!("Forwarder error: {}", e);
-            Ok(Response::builder()
+            let error_response = Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(Full::new(Bytes::from("Internal Server Error\n")))
-                .unwrap())
+                .unwrap();
+
+            // Call on_error middleware hooks
+            if let Err(mw_err) = middleware.on_error(&context, &e.to_string()).await {
+                debug!("Middleware on_error error: {}", mw_err);
+            }
+
+            // Call on_response middleware hooks for error response
+            if let Err(e) = middleware.on_response(&context, 500).await {
+                debug!("Middleware on_response error: {}", e);
+            }
+
+            Ok(error_response)
         }
-    }
+    };
+
+    result
 }

@@ -5,6 +5,7 @@ pub mod health_check;
 pub mod policy;
 pub mod forwarder;
 pub mod tls;
+pub mod middleware;
 
 pub use http::HttpProxy;
 pub use load_balancer::LoadBalancer;
@@ -15,3 +16,4 @@ pub use policy::{
 };
 pub use forwarder::RequestForwarder;
 pub use tls::{TlsServerConfig, CertificateMaterial};
+pub use middleware::{Middleware, MiddlewareChain, MiddlewareContext, LoggingMiddleware, HeaderInspectionMiddleware};
