@@ -102,13 +102,24 @@ impl HealthChecker {
     }
 
     fn extract_port(&self, url: &str) -> u16 {
-        // Extract port from "http://10.0.0.1:8080/healthz"
-        if let Some(start) = url.find(':') {
-            let rest = &url[start + 1..];
-            if let Some(end) = rest.find('/') {
-                if let Ok(port) = rest[..end].parse::<u16>() {
+        // Extract port from "http://10.0.0.1:8080/healthz" or "http://localhost:3000/health"
+        // Skip the scheme (http:// or https://)
+        let without_scheme = if let Some(pos) = url.find("://") {
+            &url[pos + 3..]
+        } else {
+            url
+        };
+
+        // Find the colon that separates host from port
+        if let Some(colon_pos) = without_scheme.find(':') {
+            let after_colon = &without_scheme[colon_pos + 1..];
+            // Extract until slash or end of string
+            if let Some(slash_pos) = after_colon.find('/') {
+                if let Ok(port) = after_colon[..slash_pos].parse::<u16>() {
                     return port;
                 }
+            } else if let Ok(port) = after_colon.parse::<u16>() {
+                return port;
             }
         }
         8080

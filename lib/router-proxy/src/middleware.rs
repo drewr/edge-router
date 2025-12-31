@@ -1,6 +1,6 @@
 //! Middleware framework for extensible request/response processing
 
-use hyper::{Request, Response, body::Bytes};
+use hyper::Request;
 use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::Result;

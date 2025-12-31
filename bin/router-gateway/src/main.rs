@@ -8,7 +8,7 @@ use hyper::{
 use hyper_util::rt::tokio::TokioIo;
 use http_body_util::Full;
 use router_core::ServiceRegistry;
-use router_proxy::{HttpProxy, HealthCheckConfig, HealthChecker, TrafficPolicy, RequestForwarder, TlsServerConfig, MiddlewareChain, LoggingMiddleware, HeaderInspectionMiddleware, MetricsCollector, MetricsMiddleware};
+use router_proxy::{HttpProxy, HealthCheckConfig, HealthChecker, TrafficPolicy, RequestForwarder, TlsServerConfig, MiddlewareChain, LoggingMiddleware, HeaderInspectionMiddleware, MetricsCollector, MetricsMiddleware, TracingMiddleware};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,6 +70,7 @@ async fn main() -> Result<()> {
     // Initialize middleware chain
     let middleware = Arc::new(
         MiddlewareChain::new()
+            .add(TracingMiddleware::new())
             .add(LoggingMiddleware)
             .add(HeaderInspectionMiddleware::new(vec![
                 "content-type".to_string(),
@@ -78,7 +79,7 @@ async fn main() -> Result<()> {
             ]))
             .add(MetricsMiddleware::new((*metrics_collector).clone()))
     );
-    info!("Middleware chain initialized with logging, header inspection, and metrics");
+    info!("Middleware chain initialized with tracing, logging, header inspection, and metrics");
 
     // Try to load TLS configuration from environment or default
     let tls_config = load_tls_config();

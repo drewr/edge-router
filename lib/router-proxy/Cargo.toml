@@ -25,3 +25,6 @@ rustls-pemfile.workspace = true
 tokio-rustls.workspace = true
 async-trait.workspace = true
 prometheus.workspace = true
+opentelemetry.workspace = true
+tracing-opentelemetry.workspace = true
+rand.workspace = true
