@@ -44,6 +44,9 @@ tokio-rustls = "0.26"
 # Async utilities
 async-trait = "0.1"
 
+# Metrics
+prometheus = { version = "0.13", features = ["protobuf"] }
+
 # Networking
 ipnetwork = "0.20"
 socket2 = "0.5"

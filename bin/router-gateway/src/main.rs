@@ -8,7 +8,7 @@ use hyper::{
 use hyper_util::rt::tokio::TokioIo;
 use http_body_util::Full;
 use router_core::ServiceRegistry;
-use router_proxy::{HttpProxy, HealthCheckConfig, HealthChecker, TrafficPolicy, RequestForwarder, TlsServerConfig, MiddlewareChain, LoggingMiddleware, HeaderInspectionMiddleware};
+use router_proxy::{HttpProxy, HealthCheckConfig, HealthChecker, TrafficPolicy, RequestForwarder, TlsServerConfig, MiddlewareChain, LoggingMiddleware, HeaderInspectionMiddleware, MetricsCollector, MetricsMiddleware};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,6 +61,12 @@ async fn main() -> Result<()> {
     let forwarder = Arc::new(RequestForwarder::new(Duration::from_secs(30)));
     info!("Request forwarder initialized with 30s timeout");
 
+    // Initialize metrics collector
+    let metrics_collector = MetricsCollector::new()
+        .expect("Failed to create metrics collector");
+    let metrics_collector = Arc::new(metrics_collector);
+    info!("Metrics collector initialized");
+
     // Initialize middleware chain
     let middleware = Arc::new(
         MiddlewareChain::new()
@@ -70,8 +76,9 @@ async fn main() -> Result<()> {
                 "authorization".to_string(),
                 "user-agent".to_string(),
             ]))
+            .add(MetricsMiddleware::new((*metrics_collector).clone()))
     );
-    info!("Middleware chain initialized with logging and header inspection");
+    info!("Middleware chain initialized with logging, header inspection, and metrics");
 
     // Try to load TLS configuration from environment or default
     let tls_config = load_tls_config();
@@ -95,6 +102,7 @@ async fn main() -> Result<()> {
         let router = router.clone();
         let forwarder = forwarder.clone();
         let middleware = middleware.clone();
+        let metrics_collector = metrics_collector.clone();
 
         tokio::task::spawn(accept_https_connections(
             https_listener,
@@ -102,6 +110,7 @@ async fn main() -> Result<()> {
             router,
             forwarder,
             middleware,
+            metrics_collector,
             tls_acceptor.unwrap(),
         ));
     } else {
@@ -118,6 +127,7 @@ async fn main() -> Result<()> {
         let router = router.clone();
         let forwarder = forwarder.clone();
         let middleware = middleware.clone();
+        let metrics_collector = metrics_collector.clone();
 
         tokio::task::spawn(async move {
             let service = service_fn(move |req| {
@@ -125,7 +135,8 @@ async fn main() -> Result<()> {
                 let router = router.clone();
                 let forwarder = forwarder.clone();
                 let middleware = middleware.clone();
-                handle_request(req, proxy, router, forwarder, middleware)
+                let metrics_collector = metrics_collector.clone();
+                handle_request(req, proxy, router, forwarder, middleware, metrics_collector)
             });
 
             if let Err(e) = http1::Builder::new()
@@ -183,6 +194,7 @@ async fn accept_https_connections(
     router: Arc<Router>,
     forwarder: Arc<RequestForwarder>,
     middleware: Arc<MiddlewareChain>,
+    metrics_collector: Arc<MetricsCollector>,
     tls_acceptor: TlsAcceptor,
 ) {
     loop {
@@ -193,6 +205,7 @@ async fn accept_https_connections(
                 let router = router.clone();
                 let forwarder = forwarder.clone();
                 let middleware = middleware.clone();
+                let metrics_collector = metrics_collector.clone();
 
                 tokio::task::spawn(async move {
                     match tls_acceptor.accept(stream).await {
@@ -203,7 +216,8 @@ async fn accept_https_connections(
                                 let router = router.clone();
                                 let forwarder = forwarder.clone();
                                 let middleware = middleware.clone();
-                                handle_request(req, proxy, router, forwarder, middleware)
+                                let metrics_collector = metrics_collector.clone();
+                                handle_request(req, proxy, router, forwarder, middleware, metrics_collector)
                             });
 
                             if let Err(e) = http1::Builder::new()
@@ -232,6 +246,7 @@ async fn handle_request(
     _router: Arc<Router>,
     forwarder: Arc<RequestForwarder>,
     middleware: Arc<MiddlewareChain>,
+    metrics_collector: Arc<MetricsCollector>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     use router_proxy::MiddlewareContext;
 
@@ -246,6 +261,24 @@ async fn handle_request(
     // Call on_request middleware hooks
     if let Err(e) = middleware.on_request(&context).await {
         debug!("Middleware on_request error: {}", e);
+    }
+
+    // Metrics endpoint
+    if path == "/metrics" && method == "GET" {
+        let metrics_text = metrics_collector
+            .gather()
+            .unwrap_or_else(|_| "Failed to gather metrics\n".to_string());
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/plain; version=0.0.4")
+            .body(Full::new(Bytes::from(metrics_text)))
+            .unwrap();
+
+        if let Err(e) = middleware.on_response(&context, 200).await {
+            debug!("Middleware on_response error: {}", e);
+        }
+
+        return Ok(response);
     }
 
     // Health check endpoint
