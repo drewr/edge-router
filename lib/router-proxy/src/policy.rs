@@ -3,7 +3,7 @@
 use std::time::Duration;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Timeout policy for requests
 #[derive(Clone, Debug)]

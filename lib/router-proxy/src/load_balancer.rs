@@ -3,7 +3,6 @@
 use router_core::Endpoint;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tracing::debug;
 
 /// Load balancing strategy
 #[derive(Debug, Clone, PartialEq)]

@@ -235,16 +235,35 @@ Total: 4 release binaries + 5 libraries
    - Detailed logging of all policy values
    - All components unit tested
 
-### 🚀 Next Steps (Phase 4)
+### ✅ Phase 4: In Progress
 
-1. **HTTP Client Forwarding** - Implement actual forwarding:
-   - Use hyper HTTP client for backend requests
-   - Stream request/response bodies
-   - Connection pooling
+1. **HTTP Client Forwarding Framework** - Foundation layer:
+   - RequestForwarder struct with timeout support
+   - Request body collection and streaming
+   - Response body handling
+   - Hop-by-hop header filtering (connection, keep-alive, proxy-authenticate, etc.)
+   - Error response handling (502 Bad Gateway, 504 Gateway Timeout, 503 Service Unavailable)
+   - Unit tests for header filtering
+   - Integrated into router-gateway startup
+   - Connected in handle_request() for actual forwarding
+
+2. **Request Forwarding Integration** - Gateway integration:
+   - RequestForwarder initialized with 30s timeout
+   - Passed to all request handlers via Arc
+   - Integration in handle_request() to forward requests
+   - Ready for Phase 4.2 HTTP client connection
+
+### 🚀 Phase 4.2 & Beyond
+
+1. **HTTP Client Connection** - Complete hyper integration:
+   - Hyper Client with connection pooling (max 10 idle per host)
+   - Actual backend request forwarding
+   - Response proxying with streaming
 
 2. **TLS Termination** - Add HTTPS support:
    - TLS certificates from VPCIngress
    - HTTPS listener on gateway
+   - mTLS between services
 
 3. **Middleware & Observability**:
    - Request/response middleware hooks
@@ -323,7 +342,7 @@ cargo run --release -p service-discovery
 
 ## Conclusion
 
-Phases 1-3 are complete with a production-ready Layer 7 router foundation. The router is:
+Phases 1-3 complete, Phase 4 underway with HTTP client forwarding framework. The router is:
 - ✅ Fully type-safe with Rust
 - ✅ Kubernetes-native with proper CRDs
 - ✅ Galactic VPC-aware and integrated
@@ -332,7 +351,8 @@ Phases 1-3 are complete with a production-ready Layer 7 router foundation. The r
 - ✅ Health checking infrastructure
 - ✅ Production-ready manifests
 - ✅ Comprehensive documentation
-- ✅ Ready for HTTP client forwarding and TLS
+- ✅ RequestForwarder framework for HTTP client forwarding
+- 🚀 Ready for Phase 4.2 hyper HTTP client connection
 
 The architecture cleanly separates concerns between:
 - **Layer 3**: Galactic VPC (packet routing via SRv6)
@@ -350,6 +370,6 @@ This enables developers to create multi-cloud applications with enterprise-grade
 
 ---
 
-**Last Updated**: 2025-12-30
-**Status**: Phase 3 Complete - Production Foundation Ready
-**Next Milestone**: Implement actual HTTP client forwarding and TLS termination (Phase 4)
+**Last Updated**: 2025-12-31
+**Status**: Phase 4 In Progress - HTTP Client Forwarding Framework
+**Next Milestone**: Complete hyper HTTP client integration (Phase 4.2) and TLS termination

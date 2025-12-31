@@ -1,10 +1,9 @@
 //! Health checking for service endpoints
 
 use router_core::Endpoint;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
-use tracing::{debug, warn, error};
+use tracing::{debug, warn};
 
 /// Health check configuration
 #[derive(Clone, Debug)]

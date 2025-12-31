@@ -8,7 +8,7 @@ use hyper::{
 use hyper_util::rt::tokio::TokioIo;
 use http_body_util::Full;
 use router_core::ServiceRegistry;
-use router_proxy::{HttpProxy, HealthCheckConfig, HealthChecker, TrafficPolicy};
+use router_proxy::{HttpProxy, HealthCheckConfig, HealthChecker, TrafficPolicy, RequestForwarder};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,6 +56,10 @@ async fn main() -> Result<()> {
     info!("  - Max Retries: {}", _traffic_policy.retry.max_retries);
     info!("  - Circuit Breaker Failure Threshold: {}", _traffic_policy.circuit_breaker.failure_threshold);
 
+    // Initialize request forwarder
+    let forwarder = Arc::new(RequestForwarder::new(Duration::from_secs(30)));
+    info!("Request forwarder initialized with 30s timeout");
+
     // Start the HTTP server on port 8080
     let addr: SocketAddr = ([0, 0, 0, 0], 8080).into();
     let listener = TcpListener::bind(&addr).await?;
@@ -69,12 +73,14 @@ async fn main() -> Result<()> {
 
         let proxy = proxy.clone();
         let router = router.clone();
+        let forwarder = forwarder.clone();
 
         tokio::task::spawn(async move {
             let service = service_fn(move |req| {
                 let proxy = proxy.clone();
                 let router = router.clone();
-                handle_request(req, proxy, router)
+                let forwarder = forwarder.clone();
+                handle_request(req, proxy, router, forwarder)
             });
 
             if let Err(e) = http1::Builder::new()
@@ -91,6 +97,7 @@ async fn handle_request(
     req: Request<hyper::body::Incoming>,
     _proxy: Arc<HttpProxy>,
     _router: Arc<Router>,
+    forwarder: Arc<RequestForwarder>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -106,11 +113,26 @@ async fn handle_request(
     }
 
     // Route the request based on VPCRoute rules
-    // For Phase 2, we'll implement basic routing
-    // Future: Match against VPCRoute resources for path-based routing
+    // Phase 2: Basic routing is available in Router module
+    // Phase 3: Health checks and policies are ready
+    // Phase 4: Now using RequestForwarder for actual HTTP forwarding
 
-    Ok(Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .body(Full::new(Bytes::from("Not Found\n")))
-        .unwrap())
+    debug!("Processing request: {} {}", method, path);
+
+    // Use forwarder to forward the request
+    // For now, it returns a 503 until full HTTP client is integrated
+    match forwarder.forward("http://backend-service:8080", req).await {
+        Ok(response) => {
+            // Convert response body to Full<Bytes>
+            let (parts, body) = response.into_parts();
+            Ok(Response::from_parts(parts, Full::new(body)))
+        }
+        Err(e) => {
+            debug!("Forwarder error: {}", e);
+            Ok(Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Full::new(Bytes::from("Internal Server Error\n")))
+                .unwrap())
+        }
+    }
 }
