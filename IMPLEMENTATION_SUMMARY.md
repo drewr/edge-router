@@ -235,7 +235,7 @@ Total: 4 release binaries + 5 libraries
    - Detailed logging of all policy values
    - All components unit tested
 
-### ✅ Phase 4: In Progress
+### ✅ Phase 4: Complete
 
 1. **HTTP Client Forwarding Framework** - Foundation layer:
    - RequestForwarder struct with timeout support
@@ -251,21 +251,28 @@ Total: 4 release binaries + 5 libraries
    - RequestForwarder initialized with 30s timeout
    - Passed to all request handlers via Arc
    - Integration in handle_request() to forward requests
-   - Ready for Phase 4.2 HTTP client connection
 
-### 🚀 Phase 4.2 & Beyond
+### ✅ Phase 4.2: Complete
 
 1. **HTTP Client Connection** - Complete hyper integration:
-   - Hyper Client with connection pooling (max 10 idle per host)
-   - Actual backend request forwarding
-   - Response proxying with streaming
+   - Hyper Client with connection pooling (HTTP connector with keepalive)
+   - Actual backend request forwarding via hyper::Client
+   - Response proxying with streaming (both request and response bodies)
+   - Timeout protection with tokio::time::timeout
+   - Header cleanup (hop-by-hop headers removed before forwarding)
+   - Error handling:
+     - 502 Bad Gateway for backend errors
+     - 504 Gateway Timeout for request timeouts
+   - Unit tests for forwarder creation and header filtering
 
-2. **TLS Termination** - Add HTTPS support:
+### 🚀 Phase 4.3 & Beyond
+
+1. **TLS Termination** - Add HTTPS support:
    - TLS certificates from VPCIngress
    - HTTPS listener on gateway
    - mTLS between services
 
-3. **Middleware & Observability**:
+2. **Middleware & Observability**:
    - Request/response middleware hooks
    - Prometheus metrics
    - Distributed tracing
@@ -342,17 +349,20 @@ cargo run --release -p service-discovery
 
 ## Conclusion
 
-Phases 1-3 complete, Phase 4 underway with HTTP client forwarding framework. The router is:
+Phases 1-4.2 complete! The router is production-ready with end-to-end HTTP request forwarding:
 - ✅ Fully type-safe with Rust
 - ✅ Kubernetes-native with proper CRDs
 - ✅ Galactic VPC-aware and integrated
 - ✅ HTTP/1.1 gateway with request routing
-- ✅ Complete traffic policy framework
+- ✅ Complete traffic policy framework (timeout, retry, circuit breaker)
 - ✅ Health checking infrastructure
 - ✅ Production-ready manifests
 - ✅ Comprehensive documentation
 - ✅ RequestForwarder framework for HTTP client forwarding
-- 🚀 Ready for Phase 4.2 hyper HTTP client connection
+- ✅ Complete hyper HTTP client connection with connection pooling
+- ✅ Response proxying with streaming
+- ✅ Timeout protection and error handling
+- 🚀 Ready for Phase 4.3 TLS termination and observability
 
 The architecture cleanly separates concerns between:
 - **Layer 3**: Galactic VPC (packet routing via SRv6)
@@ -371,5 +381,5 @@ This enables developers to create multi-cloud applications with enterprise-grade
 ---
 
 **Last Updated**: 2025-12-31
-**Status**: Phase 4 In Progress - HTTP Client Forwarding Framework
-**Next Milestone**: Complete hyper HTTP client integration (Phase 4.2) and TLS termination
+**Status**: Phase 4.2 Complete - HTTP Client Connection with hyper
+**Next Milestone**: TLS termination and observability (Phase 4.3)
