@@ -36,6 +36,11 @@ http-body-util = "0.1"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 
+# TLS
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+
 # Networking
 ipnetwork = "0.20"
 socket2 = "0.5"
