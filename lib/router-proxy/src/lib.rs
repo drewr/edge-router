@@ -22,7 +22,8 @@ pub use tls::{TlsServerConfig, CertificateMaterial};
 pub use mtls::{
     ClientAuthMode, TlsClientConfig, MtlsClientVerifier,
     CertificateMetadata, CertificatePinner, CertificateValidationResult,
-    calculate_cert_fingerprint
+    calculate_cert_fingerprint,
+    RevocationStatus, RevocationCache, OcspConfig, RevocationRequest, RevocationChecker
 };
 pub use middleware::{Middleware, MiddlewareChain, MiddlewareContext, LoggingMiddleware, HeaderInspectionMiddleware};
 pub use metrics::{MetricsCollector, MetricsMiddleware};

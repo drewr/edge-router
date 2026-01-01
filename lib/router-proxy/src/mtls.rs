@@ -8,7 +8,10 @@ use std::io::BufReader;
 use std::collections::HashMap;
 use anyhow::{Result, anyhow};
 use tracing::{debug, info, warn};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::sync::Arc;
+use lru::LruCache;
+use std::sync::Mutex;
 
 /// Client authentication mode for incoming TLS connections
 #[derive(Clone, Debug, PartialEq)]
@@ -301,6 +304,214 @@ pub fn calculate_cert_fingerprint(cert_der: &CertificateDer) -> String {
     hex::encode(hash)
 }
 
+/// Certificate revocation status
+#[derive(Clone, Debug, PartialEq)]
+pub enum RevocationStatus {
+    /// Certificate is valid (not revoked)
+    Valid,
+    /// Certificate has been revoked
+    Revoked { reason: String, revoked_at: u64 },
+    /// Revocation status unknown (no CRL/OCSP available)
+    Unknown,
+}
+
+impl RevocationStatus {
+    /// Check if the certificate is valid (not revoked)
+    pub fn is_valid(&self) -> bool {
+        matches!(self, RevocationStatus::Valid)
+    }
+
+    /// Check if the certificate is revoked
+    pub fn is_revoked(&self) -> bool {
+        matches!(self, RevocationStatus::Revoked { .. })
+    }
+}
+
+/// CRL (Certificate Revocation List) Cache
+/// Caches revocation status to avoid repeated CRL checks
+#[derive(Clone)]
+pub struct RevocationCache {
+    /// LRU cache mapping certificate fingerprints to revocation status
+    cache: Arc<Mutex<LruCache<String, RevocationStatus>>>,
+}
+
+impl RevocationCache {
+    /// Create a new revocation cache with a given capacity
+    pub fn new(capacity: usize) -> Result<Self> {
+        Ok(Self {
+            cache: Arc::new(Mutex::new(
+                LruCache::new(std::num::NonZeroUsize::new(capacity)
+                    .ok_or_else(|| anyhow!("Cache capacity must be greater than 0"))?),
+            )),
+        })
+    }
+
+    /// Get the revocation status for a certificate (from cache)
+    pub fn get(&self, fingerprint: &str) -> Option<RevocationStatus> {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.get(fingerprint).cloned()
+    }
+
+    /// Put a revocation status in the cache
+    pub fn put(&self, fingerprint: String, status: RevocationStatus) {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.put(fingerprint, status);
+        debug!("Added revocation status to cache");
+    }
+
+    /// Clear the cache
+    pub fn clear(&self) {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.clear();
+        info!("Revocation cache cleared");
+    }
+
+    /// Get cache statistics (for monitoring)
+    pub fn stats(&self) -> (usize, usize) {
+        let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        (cache.len(), cache.cap().get())
+    }
+}
+
+/// OCSP (Online Certificate Status Protocol) Configuration
+#[derive(Clone, Debug)]
+pub struct OcspConfig {
+    /// OCSP responder URL (extracted from certificate)
+    pub responder_url: String,
+    /// Timeout for OCSP requests (in seconds)
+    pub timeout: Duration,
+    /// Whether to require OCSP response
+    pub require_response: bool,
+}
+
+/// Revocation Status Request
+#[derive(Clone, Debug)]
+pub struct RevocationRequest {
+    /// Certificate fingerprint (SHA256)
+    pub cert_fingerprint: String,
+    /// Issuer certificate fingerprint
+    pub issuer_fingerprint: Option<String>,
+    /// CRL distribution points from certificate
+    pub crl_distribution_points: Vec<String>,
+    /// OCSP configuration (if applicable)
+    pub ocsp_config: Option<OcspConfig>,
+}
+
+/// Comprehensive revocation checker
+#[derive(Clone)]
+pub struct RevocationChecker {
+    /// Cache for revocation results
+    cache: RevocationCache,
+    /// Maximum cache size
+    cache_capacity: usize,
+    /// Whether CRL checking is enabled
+    enable_crl: bool,
+    /// Whether OCSP checking is enabled
+    enable_ocsp: bool,
+}
+
+impl RevocationChecker {
+    /// Create a new revocation checker with given settings
+    pub fn new(
+        cache_capacity: usize,
+        enable_crl: bool,
+        enable_ocsp: bool,
+    ) -> Result<Self> {
+        let cache = RevocationCache::new(cache_capacity)?;
+        info!(
+            "Created revocation checker (CRL: {}, OCSP: {}, cache size: {})",
+            enable_crl, enable_ocsp, cache_capacity
+        );
+
+        Ok(Self {
+            cache,
+            cache_capacity,
+            enable_crl,
+            enable_ocsp,
+        })
+    }
+
+    /// Check the revocation status of a certificate
+    pub fn check_revocation(&self, request: RevocationRequest) -> Result<RevocationStatus> {
+        // Check cache first
+        if let Some(cached_status) = self.cache.get(&request.cert_fingerprint) {
+            debug!("Revocation status from cache: {:?}", cached_status);
+            return Ok(cached_status);
+        }
+
+        // Default to Unknown if checking is disabled
+        if !self.enable_crl && !self.enable_ocsp {
+            debug!("Revocation checking disabled");
+            let status = RevocationStatus::Unknown;
+            self.cache.put(request.cert_fingerprint, status.clone());
+            return Ok(status);
+        }
+
+        // Try OCSP first (faster, real-time)
+        if self.enable_ocsp {
+            if let Some(ocsp_config) = &request.ocsp_config {
+                match self.check_ocsp(ocsp_config, &request.cert_fingerprint) {
+                    Ok(status) => {
+                        self.cache.put(request.cert_fingerprint.clone(), status.clone());
+                        return Ok(status);
+                    }
+                    Err(e) => {
+                        warn!("OCSP check failed: {}", e);
+                        // Continue to CRL if OCSP fails
+                    }
+                }
+            }
+        }
+
+        // Try CRL as fallback
+        if self.enable_crl && !request.crl_distribution_points.is_empty() {
+            match self.check_crl(&request.crl_distribution_points, &request.cert_fingerprint) {
+                Ok(status) => {
+                    self.cache.put(request.cert_fingerprint.clone(), status.clone());
+                    return Ok(status);
+                }
+                Err(e) => {
+                    warn!("CRL check failed: {}", e);
+                }
+            }
+        }
+
+        // Return Unknown if no checking method succeeded
+        debug!("Revocation status unknown");
+        let status = RevocationStatus::Unknown;
+        self.cache.put(request.cert_fingerprint, status.clone());
+        Ok(status)
+    }
+
+    /// Check revocation via OCSP (internal)
+    fn check_ocsp(&self, _ocsp_config: &OcspConfig, _fingerprint: &str) -> Result<RevocationStatus> {
+        // Phase 4.9: OCSP checking infrastructure
+        // Full OCSP response parsing would be implemented here
+        // For now, return Unknown to allow fallback to CRL
+        debug!("OCSP checking not yet fully implemented");
+        Ok(RevocationStatus::Unknown)
+    }
+
+    /// Check revocation via CRL (internal)
+    fn check_crl(&self, _crl_points: &[String], _fingerprint: &str) -> Result<RevocationStatus> {
+        // Phase 4.9: CRL checking infrastructure
+        // Full CRL fetching and parsing would be implemented here
+        // For now, return Unknown
+        debug!("CRL checking not yet fully implemented");
+        Ok(RevocationStatus::Unknown)
+    }
+
+    /// Get cache statistics
+    pub fn cache_stats(&self) -> (usize, usize) {
+        self.cache.stats()
+    }
+
+    /// Clear the revocation cache
+    pub fn clear_cache(&self) {
+        self.cache.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,5 +767,203 @@ mod tests {
 
         // Different certificates should have different fingerprints
         assert_ne!(fp1, fp2);
+    }
+
+    // Phase 4.9: CRL/OCSP Revocation Checking Tests
+
+    #[test]
+    fn test_revocation_status_valid() {
+        let status = RevocationStatus::Valid;
+        assert!(status.is_valid());
+        assert!(!status.is_revoked());
+    }
+
+    #[test]
+    fn test_revocation_status_revoked() {
+        let status = RevocationStatus::Revoked {
+            reason: "Superseded".to_string(),
+            revoked_at: 1000000,
+        };
+        assert!(!status.is_valid());
+        assert!(status.is_revoked());
+    }
+
+    #[test]
+    fn test_revocation_status_unknown() {
+        let status = RevocationStatus::Unknown;
+        assert!(!status.is_valid());
+        assert!(!status.is_revoked());
+    }
+
+    #[test]
+    fn test_revocation_cache_creation() {
+        let cache = RevocationCache::new(100).expect("Cache creation failed");
+        let (len, cap) = cache.stats();
+        assert_eq!(len, 0);
+        assert_eq!(cap, 100);
+    }
+
+    #[test]
+    fn test_revocation_cache_put_get() {
+        let cache = RevocationCache::new(100).expect("Cache creation failed");
+        let fp = "abc123".to_string();
+        let status = RevocationStatus::Valid;
+
+        cache.put(fp.clone(), status.clone());
+        let retrieved = cache.get(&fp);
+
+        assert_eq!(retrieved, Some(status));
+    }
+
+    #[test]
+    fn test_revocation_cache_lru_eviction() {
+        let cache = RevocationCache::new(2).expect("Cache creation failed");
+
+        cache.put("cert1".to_string(), RevocationStatus::Valid);
+        cache.put("cert2".to_string(), RevocationStatus::Unknown);
+        cache.put("cert3".to_string(), RevocationStatus::Valid);
+
+        // cert1 should be evicted due to LRU
+        assert_eq!(cache.get("cert1"), None);
+        assert_eq!(cache.get("cert2"), Some(RevocationStatus::Unknown));
+        assert_eq!(cache.get("cert3"), Some(RevocationStatus::Valid));
+    }
+
+    #[test]
+    fn test_revocation_cache_clear() {
+        let cache = RevocationCache::new(100).expect("Cache creation failed");
+        cache.put("cert1".to_string(), RevocationStatus::Valid);
+        cache.clear();
+
+        assert_eq!(cache.get("cert1"), None);
+        let (len, _) = cache.stats();
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn test_ocsp_config_creation() {
+        let config = OcspConfig {
+            responder_url: "http://ocsp.example.com".to_string(),
+            timeout: Duration::from_secs(5),
+            require_response: true,
+        };
+
+        assert_eq!(config.responder_url, "http://ocsp.example.com");
+        assert_eq!(config.timeout, Duration::from_secs(5));
+        assert!(config.require_response);
+    }
+
+    #[test]
+    fn test_revocation_request_creation() {
+        let request = RevocationRequest {
+            cert_fingerprint: "abc123".to_string(),
+            issuer_fingerprint: Some("def456".to_string()),
+            crl_distribution_points: vec!["http://crl.example.com/crl.pem".to_string()],
+            ocsp_config: Some(OcspConfig {
+                responder_url: "http://ocsp.example.com".to_string(),
+                timeout: Duration::from_secs(5),
+                require_response: true,
+            }),
+        };
+
+        assert_eq!(request.cert_fingerprint, "abc123");
+        assert_eq!(request.issuer_fingerprint, Some("def456".to_string()));
+        assert_eq!(request.crl_distribution_points.len(), 1);
+        assert!(request.ocsp_config.is_some());
+    }
+
+    #[test]
+    fn test_revocation_checker_creation() {
+        let checker = RevocationChecker::new(100, true, true)
+            .expect("Revocation checker creation failed");
+        let (len, cap) = checker.cache_stats();
+        assert_eq!(len, 0);
+        assert_eq!(cap, 100);
+    }
+
+    #[test]
+    fn test_revocation_checker_disabled() {
+        let checker = RevocationChecker::new(100, false, false)
+            .expect("Revocation checker creation failed");
+
+        let request = RevocationRequest {
+            cert_fingerprint: "abc123".to_string(),
+            issuer_fingerprint: None,
+            crl_distribution_points: vec![],
+            ocsp_config: None,
+        };
+
+        let status = checker
+            .check_revocation(request)
+            .expect("Check failed");
+        assert_eq!(status, RevocationStatus::Unknown);
+    }
+
+    #[test]
+    fn test_revocation_checker_caching() {
+        let checker = RevocationChecker::new(100, false, false)
+            .expect("Revocation checker creation failed");
+
+        let request = RevocationRequest {
+            cert_fingerprint: "abc123".to_string(),
+            issuer_fingerprint: None,
+            crl_distribution_points: vec![],
+            ocsp_config: None,
+        };
+
+        // First call should return Unknown and cache it
+        let status1 = checker
+            .check_revocation(request.clone())
+            .expect("Check failed");
+        assert_eq!(status1, RevocationStatus::Unknown);
+
+        // Second call should return from cache
+        let status2 = checker
+            .check_revocation(request)
+            .expect("Check failed");
+        assert_eq!(status2, RevocationStatus::Unknown);
+
+        let (len, _) = checker.cache_stats();
+        assert_eq!(len, 1); // Should be in cache
+    }
+
+    #[test]
+    fn test_revocation_checker_clear_cache() {
+        let checker = RevocationChecker::new(100, true, false)
+            .expect("Revocation checker creation failed");
+
+        let request = RevocationRequest {
+            cert_fingerprint: "abc123".to_string(),
+            issuer_fingerprint: None,
+            crl_distribution_points: vec![],
+            ocsp_config: None,
+        };
+
+        // Add to cache
+        let _ = checker
+            .check_revocation(request)
+            .expect("Check failed");
+        let (len_before, _) = checker.cache_stats();
+        assert_eq!(len_before, 1);
+
+        // Clear cache
+        checker.clear_cache();
+        let (len_after, _) = checker.cache_stats();
+        assert_eq!(len_after, 0);
+    }
+
+    #[test]
+    fn test_revocation_request_with_multiple_crl_points() {
+        let request = RevocationRequest {
+            cert_fingerprint: "abc123".to_string(),
+            issuer_fingerprint: None,
+            crl_distribution_points: vec![
+                "http://crl1.example.com/crl.pem".to_string(),
+                "http://crl2.example.com/crl.pem".to_string(),
+            ],
+            ocsp_config: None,
+        };
+
+        assert_eq!(request.crl_distribution_points.len(), 2);
     }
 }
