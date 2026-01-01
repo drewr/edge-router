@@ -1,5 +1,8 @@
 # Datum Router - Layer 7 Application Router for Galactic VPC
 
+*Note: This is an unadulterated creation of Claude's `claude-haiku-4-5-20251001` using [Datum's open-source](https://github.com/datum-cloud) as source material. It is an experiment that I crammed into a few days over the winter 2025 holidays during Anthropic's 2x usage limits for the Pro subscription. I reviewed very little of the work in order to maximize the progress before the deadline. I separated the Git commits by each phase or sub-phase of the plan Claude created at the beginning of the project to be able to reverse engineer the model's approach.*
+
+----
 A Rust-based Layer 7 application router that sits above Galactic VPC's Layer 3 SRv6 overlay network. The router provides service discovery, HTTP/gRPC routing, and traffic management across multi-cloud Kubernetes clusters.
 
 ## Features
